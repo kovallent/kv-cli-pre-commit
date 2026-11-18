@@ -1,0 +1,124 @@
+name: test
+
+on: push
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    # Named explicitly so steps run with -eo pipefail.
+    shell: bash
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      # The tag and the pin must always match: `version` in pyproject.toml,
+      # the `kv-cli==` pin, the README's `rev:` and, on a tag push, the tag.
+      - name: Version, kv-cli pin and tag agree
+        id: version
+        run: |
+          python - <<'EOF'
+          import os
+          import re
+          import sys
+          import tomllib
+
+          with open("pyproject.toml", "rb") as f:
+              project = tomllib.load(f)["project"]
+          version = project["version"]
+          errors = []
+
+          def requirement_name(req):
+              name = re.match(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)", req).group(1)
+              return re.sub(r"[-_.]+", "-", name).lower()
+
+          kv_cli = [d for d in project.get("dependencies", []) if requirement_name(d) == "kv-cli"]
+          if len(kv_cli) != 1:
+              errors.append(f"expected exactly one kv-cli dependency, found {kv_cli}")
+          else:
+              pin = re.fullmatch(r"\s*kv[-_.]cli\s*==\s*([^\s;,]+)\s*", kv_cli[0], re.I)
+              if not pin:
+                  errors.append(f"kv-cli must be pinned exactly (kv-cli==X.Y.Z), found {kv_cli[0]!r}")
+              elif pin.group(1) != version:
+                  errors.append(f"pyproject.toml pins kv-cli=={pin.group(1)} but version = {version!r}")
+
+          if os.environ.get("GITHUB_REF_TYPE") == "tag":
+              tag = os.environ["GITHUB_REF_NAME"]
+              if tag != f"v{version}":
+                  errors.append(f"tag {tag} does not match version = {version!r} (expected v{version})")
+
+          with open("README.md", encoding="utf-8") as f:
+              revs = re.findall(r"^\s*rev:\s*(\S+)", f.read(), re.M)
+          if not revs or any(rev != f"v{version}" for rev in revs):
+              errors.append(f"README.md must use rev: v{version}, found {revs}")
+
+          for error in errors:
+              print(f"::error::{error}")
+          if errors:
+              sys.exit(1)
+
+          print(f"version {version}: kv-cli pin, README rev and tag agree")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"version={version}\n")
+          EOF
+
+      - name: Install pre-commit
+        run: python -m pip install pre-commit==4.7.0
+
+      # The runner ships Rust. Take it off PATH for the hook steps, so they
+      # prove kv-cli installs from its wheel with no toolchain present.
+      - name: Hide the Rust toolchain
+        run: |
+          stripped=$(printf '%s' "$PATH" | tr ':' '\n' | grep -v -e '\.cargo' -e 'rustup' | paste -sd: -)
+          for tool in cargo rustc rustup; do
+            if PATH=$stripped command -v "$tool"; then
+              echo "::error::$tool is still on PATH"
+              exit 1
+            fi
+          done
+          echo "PATH_WITHOUT_RUST=$stripped" >> "$GITHUB_ENV"
+
+      - name: kv-cli hook passes on samples/compliant.py
+        env:
+          SAMPLES: https://raw.githubusercontent.com/kovallent/kv-cli/v${{ steps.version.outputs.version }}/samples
+        run: |
+          export PATH=$PATH_WITHOUT_RUST
+          hook_repo=$PWD
+          git init -q "$RUNNER_TEMP/scratch"
+          cd "$RUNNER_TEMP/scratch"
+          curl -fsSL -o compliant.py "$SAMPLES/compliant.py"
+          git add compliant.py
+
+          pre-commit try-repo "$hook_repo" kv-cli --all-files --verbose 2>&1 | tee "$RUNNER_TEMP/pass.log"
+          grep -Eq '^kv-cli contract audit\.+Passed' "$RUNNER_TEMP/pass.log"
+
+      - name: kv-cli hook fails on samples/deploy.py
+        env:
+          SAMPLES: https://raw.githubusercontent.com/kovallent/kv-cli/v${{ steps.version.outputs.version }}/samples
+        run: |
+          export PATH=$PATH_WITHOUT_RUST
+          hook_repo=$PWD
+          cd "$RUNNER_TEMP/scratch"
+          curl -fsSL -o deploy.py "$SAMPLES/deploy.py"
+          git add deploy.py
+
+          status=0
+          pre-commit try-repo "$hook_repo" kv-cli --all-files --verbose > "$RUNNER_TEMP/fail.log" 2>&1 || status=$?
+          cat "$RUNNER_TEMP/fail.log"
+          # Fail for the right reason: the hook ran and kv-cli exited 1
+          # (findings), not 2 (tool error) or an install failure.
+          if [ "$status" -ne 1 ] \
+            || ! grep -Eq '^kv-cli contract audit\.+Failed' "$RUNNER_TEMP/fail.log" \
+            || ! grep -q -- '- exit code: 1$' "$RUNNER_TEMP/fail.log" \
+            || ! grep -q 'deploy\.py' "$RUNNER_TEMP/fail.log"; then
+            echo "::error::expected the kv-cli hook to fail with findings in deploy.py; pre-commit exited $status"
+            exit 1
+          fi

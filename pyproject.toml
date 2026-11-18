@@ -1,0 +1,24 @@
+# Installs kv-cli's prebuilt binary wheel from PyPI, so the pre-commit hooks
+# need no Rust toolchain. This package ships no code of its own.
+#
+# `version` and the kv-cli pin must always be the same version, and the git
+# tag must be `v<version>`. The workflow in .github/workflows/test.yml fails
+# if they drift apart.
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kv-cli-pre-commit"
+version = "0.9.0"
+description = "pre-commit hooks for kv-cli, installed from its prebuilt PyPI wheels."
+requires-python = ">=3.8"
+dependencies = ["kv-cli==0.9.0"]
+
+[project.urls]
+Homepage = "https://github.com/kovallent/kv-cli-pre-commit"
+Upstream = "https://github.com/kovallent/kv-cli"
+
+[tool.setuptools]
+packages = []
