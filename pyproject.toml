@@ -11,10 +11,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kv-cli-pre-commit"
-version = "0.13.0"
+version = "0.14.0"
 description = "pre-commit hooks for kv-cli, installed from its prebuilt PyPI wheels."
 requires-python = ">=3.8"
-dependencies = ["kv-cli==0.13.0"]
+dependencies = ["kv-cli==0.14.0"]
 
 [project.urls]
 Homepage = "https://github.com/kovallent/kv-cli-pre-commit"
